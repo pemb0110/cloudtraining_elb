@@ -1,135 +1,129 @@
-
 # Configure the AWS Provider
 terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 4.0" # Or latest
+      version = "~> 4.0"
     }
   }
 }
 
 provider "aws" {
-  region = "eu-west-2" # Replace with your desired region
+  region = "us-west-2" # Replace with your desired region
 }
 
-# Data sources for AZs
-data "aws_availability_zones" "available" {}
+# Create an RDS instance
+resource "aws_db_instance" "postgres" {
+  allocated_storage    = 20
+  engine               = "postgres"
+  engine_version       = "14.5"
+  instance_class       = "db.t3.micro"
+  identifier           = "my-postgres-db"
+  username             = "myuser"
+  password             = "mypassword" # **Important: Securely manage this password**
+  skip_final_snapshot = true
+  db_name              = "mylistdb"
+  publicly_accessible = true # **Important: Consider security implications**
+}
 
-
-# Create a security group to allow HTTP access
-resource "aws_security_group" "web_sg" {
-  name        = "allow_http"
-  description = "Allow HTTP inbound traffic"
+# Create a security group for the RDS instance
+resource "aws_security_group" "rds_sg" {
+  name        = "rds-security-group"
+  description = "Allow inbound traffic to RDS"
 
   ingress {
-    description      = "HTTP from anywhere"
-    from_port        = 80
-    to_port          = 80
-    protocol         = "tcp"
-    cidr_blocks      = ["0.0.0.0/0"] # Open to the world - restrict in production
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # **Important: Restrict this in production**
   }
-
-  egress {
-    from_port        = 0
-    to_port          = 0
-    protocol         = "all"
-    cidr_blocks      = ["0.0.0.0/0"]
-  }
-
-  vpc_id = "vpc-a7ed89cf"
-  
-  //aws_default_vpc.default.id # Use the default VPC (or create your own)
-
 }
 
-# Use the default VPC (or create your own)
-// data "aws_default_vpc" "default" {}
+# Associate the security group with the RDS instance
+resource "aws_db_instance" "postgres" {
+  vpc_security_group_ids = [aws_security_group.rds_sg.id]
+}
 
-# Create a launch template
-resource "aws_launch_template" "web" {
-  name_prefix   = "web-server-template-"
-  image_id      = "ami-0fc32db49bc3bfbb1" # Amazon Linux 2 AMI (replace with your preferred AMI)
+# Create an EC2 instance
+resource "aws_instance" "webserver" {
+  ami           = "ami-0c55b31ad2299a701" # Replace with a suitable Amazon Linux AMI
   instance_type = "t2.micro"
+  key_name      = "your_key_pair_name" # Replace with your key pair name
+
+  vpc_security_group_ids = [aws_security_group.webserver_sg.id]
+
+  tags = {
+    Name = "my-web-app"
+  }
+}
+
+# Create a security group for the EC2 instance
+resource "aws_security_group" "webserver_sg" {
+  name        = "webserver-security-group"
+  description = "Allow inbound traffic to webserver"
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # **Important: Restrict this in production**
+  }
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # **Important: Restrict this in production**
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+
+# ... (Existing RDS configuration remains the same) ...
+
+# Define the existing S3 bucket (no need to create it)
+variable "s3_bucket_name" {
+  type = string
+  description = "Name of the existing S3 bucket"
+}
+
+variable "s3_bucket_region" {
+  type = string
+  description = "Region of the existing S3 bucket"
+}
+
+
+# Create an EC2 instance with user data to download files
+resource "aws_instance" "webserver" {
+  # ... (Existing EC2 configuration) ...
+
   user_data = <<-EOF
-
 #!/bin/bash
-    yum update -y
-    yum install -y httpd
-    systemctl start httpd
-    systemctl enable httpd
-    AZ=$(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone)
-    echo "<html><body><h1>Hello, World! from $(hostname -f) in AZ: " > /var/www/html/index.html
-    echo $AZ > /var/www/html/index.html
-    echo "</h1></body></html>" > /var/www/html/index.html
-  EOF
-  
-  
-  network_interfaces {
-    security_groups = [aws_security_group.web_sg.id]
-  }
+yum update -y
+yum install python3 -y
+yum install python3-pip -y
+pip3 install Flask psycopg2-binary
+mkdir -p /var/www/html/templates
+aws s3 cp s3://jd-app-files-4-jul-25/app.py /var/www/html/
+aws s3 cp s3://jd-app-files-4-jul-25/templates/ /var/www/html/templates/
+chmod +x /var/www/html/app.py
+chown ec2-user:ec2-user /var/www/html/templates
+systemctl start httpd
+systemctl enable httpd
+EOF
 }
 
+# ... (Existing outputs) ...# ... (Existing outputs) ...
 
-
-# Create an Auto Scaling group
-resource "aws_autoscaling_group" "web" {
-  name                      = "web-server-asg"
-  min_size                  = 2 # Minimum 2 instances
-  max_size                  = 2 # Maximum 2 instances (adjust as needed)
-  desired_capacity          = 2
-  health_check_grace_period = 300 # Give instances time to start up
- health_check_type         = "ELB" # Use ELB health checks
-  vpc_zone_identifier       = [data.aws_availability_zones.available.names[0], data.aws_availability_zones.available.names[1]] # Deploy across 2 AZs
-
-  launch_template {
-    id      = aws_launch_template.web.id
-    version = "$Latest"
-  }
-
-  tag {
-    key                 = "Name"
-    value               = "web-server-instance-asg"
-    propagate_at_launch = true
-  }
+# Output the public IP address of the EC2 instance
+output "public_ip" {
+  value = aws_instance.webserver.public_ip
 }
 
-
-
-# Create a load balancer
-resource "aws_elb" "web_lb" {
- name = "web-server-lb"
-  subnets         = [data.aws_availability_zones.available.names[0], data.aws_availability_zones.available.names[1]]
-  security_groups = [aws_security_group.web_sg.id]
-
- listener {
-    instance_port     = 80
-    instance_protocol = "http"
-    lb_port           = 80
-    lb_protocol       = "http"
-  }
-
-
-  health_check {
-    healthy_threshold = 2
-    unhealthy_threshold = 2
-    timeout = 3
-    target = "HTTP:80/"
-    interval = 30
-  }
-  
-}
-
-
-# Attach the ASG to the load balancer
-resource "aws_elb_attachment" "web" {
- elb        = aws_elb.web_lb.id
- instance = aws_autoscaling_group.web.id
-}
-
-
-
-# Output the DNS name of the load balancer
-output "lb_dns_name" {
-  value = aws_elb.web_lb.dns_name
+output "rds_endpoint" {
+  value = aws_db_instance.postgres.endpoint
 }
